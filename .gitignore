@@ -1,0 +1,11 @@
+target/
+*/target/
+project/target/
+project/project/
+*/hw/gen/
+**/hw/gen/
+simWorkspace/
+*/simWorkspace/
+**/build/
+.bsp/
+.sbt

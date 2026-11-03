@@ -1,0 +1,12 @@
+# iCESugar v1.5 (iCE40UP5K-SG48), piny wg wuxx/icesugar src/common/io.pcf
+set_io clk     35
+
+set_io led_r_n 40
+set_io led_g_n 41
+set_io led_b_n 39
+
+# SW1..SW4; wspoldzielone z PMOD4 (P4_4..P4_1)
+set_io sw[0]   18
+set_io sw[1]   19
+set_io sw[2]   20
+set_io sw[3]   21
