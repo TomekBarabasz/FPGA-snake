@@ -19,6 +19,7 @@ hw/
   snake/              logika niezależna od płytki: newhope.snake (gra), newhope.snake.board (ResetGen)
   demo/tangnano9k/    top, cst, Makefile
   demo/icesugar/      top, pcf, Makefile
+  demo/mimas_j1/      Mimas V2: J1 + SwapForth + wyświetlacz 7-seg (poligon rozszerzeń J1)
 doc/                  notatki projektowe
 ```
 
