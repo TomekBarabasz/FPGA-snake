@@ -2,3 +2,7 @@
 	path = hw/lib
 	url = https://github.com/TomekBarabasz/fpga-hw-lib
 	branch = main
+[submodule "hw/cpu/j1"]
+	path = hw/cpu/j1
+	url = https://github.com/TomekBarabasz/J1Sc
+	branch = newhope

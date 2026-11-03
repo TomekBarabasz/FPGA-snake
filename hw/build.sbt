@@ -1,5 +1,6 @@
 // hw/build.sbt - gra snake na FPGA.
 //   snake/        logika niezalezna od plytki (gra, VGA/HDMI, sterowanie)
+//   cpu/j1/       CPU J1 (submodule, fork J1Sc)
 //   demo/<plytka> top-levele per plytka: tangnano9k (GW1NR-9), icesugar (iCE40UP5K)
 // Biblioteki: submodule lib/ (github.com/TomekBarabasz/fpga-hw-lib), wciagane
 // ze zrodel jako osobny build sbt (ProjectRef) - edycja w lib/ jest widoczna
@@ -19,11 +20,16 @@ def libRef(id: String) = ProjectRef(file("lib"), id)
 lazy val core     = libRef("core")
 lazy val vertebra = libRef("vertebra")
 
+// ---- CPU: submodule cpu/j1 (github.com/TomekBarabasz/J1Sc, galaz newhope) ----
+// Fork J1Sc przeniesiony na Spinal 1.12 / Scala 2.13 (cpu/j1/NEWHOPE.md).
+// Testy CPU: sbt "{cpu/j1}j1/test".
+lazy val j1 = ProjectRef(file("cpu/j1"), "j1")
+
 // ---- logika gry (niezalezna od plytki) -----------------------------------------
 
 lazy val snake = Project("snake", file("snake"))
   .settings(hwLayout, forkSettings, libraryDependencies ++= spinal, publish / skip := true)
-  .dependsOn(core, vertebra % "test->compile")
+  .dependsOn(core, j1, vertebra % "test->compile")
 
 // ---- plytki ------------------------------------------------------------------
 
@@ -36,7 +42,7 @@ def board(id: String) = Project(s"demo-$id", file(s"demo/$id"))
 lazy val tangnano9k = board("tangnano9k")
 lazy val icesugar   = board("icesugar")
 
-// test z hw/ odpala tez testy bibliotek (aggregate hwlib).
+// test z hw/ odpala tez testy bibliotek i CPU (aggregate hwlib, j1).
 lazy val root = (project in file("."))
-  .aggregate(hwlib, snake, tangnano9k, icesugar)
+  .aggregate(hwlib, j1, snake, tangnano9k, icesugar)
   .settings(publish / skip := true)

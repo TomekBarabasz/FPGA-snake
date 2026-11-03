@@ -1,6 +1,7 @@
 # J1Sc jako CPU gry
 
 Upstream: https://github.com/SteffenReith/J1Sc (BSD-3, ostatni commit 2020-06, gałąź `master`).
+Fork: https://github.com/TomekBarabasz/J1Sc, gałąź `newhope`, submodule `hw/cpu/j1`.
 
 ## Stan upstreamu (2020)
 
@@ -25,18 +26,21 @@ gołe submodule do upstreamu.
 - Kopia (nowe repo z wklejonym kodem) traci historię i zrywa łańcuch zmian; zysk
   tylko taki, że repo może być prywatne (fork publicznego repo musi być publiczny).
 
-## Plan
-1. Fork `SteffenReith/J1Sc` → `TomekBarabasz/J1Sc`; gałąź robocza np. `newhope`.
-2. Port w forku, osobne commity:
-   - `build.sbt` w stylu fpga-hw-lib (projekt `j1`, `hwLayout`, zależność od `core`
-     przez `ProjectRef` albo bez niej), Scala 2.13, Spinal 1.12;
-   - pakiet (np. `j1sc`), przeniesienie do `hw/spinal/main`;
-   - API Spinala 1.4 → 1.12 (głównie `Mem`, `ClockDomain`, `BusSlaveFactory`, sim);
-   - ROM z firmware przez `initialContent`/`inlineRom` zamiast `$readmemb`;
-   - top-levele IceBreaker/IcoBoard/Nexys4 zostają albo wylatują do `boards/`.
-3. W FPGA-snake: `git submodule add -b newhope https://github.com/TomekBarabasz/J1Sc hw/cpu/j1`,
-   w `hw/build.sbt`: `lazy val j1 = ProjectRef(file("cpu/j1"), "j1")`, `snake.dependsOn(j1)`.
-4. Firmware (Forth, `support/`/`toolchain/` w J1Sc): generacja obrazu ROM w buildzie.
+## Stan (2026-11-03)
+Zrobione (szczegóły w `hw/cpu/j1/NEWHOPE.md`):
+1. Fork + gałąź `newhope`; źródła w `j1/hw/spinal` (rdzeń) i `boards/hw/spinal` (płytki upstreamu), przeniesione `git mv`.
+2. Port: Scala 2.13.14, SpinalHDL 1.12.3, sbt 1.12.4, pakiety `j1sc` / `j1sc.boards`; logika bez zmian.
+3. Poprawka upstreamu: `J1RStack` brał szerokość wskaźnika z `dataStackIdxWidth` — konfiguracje
+   z różną głębokością stosów (`default16`, `debug16`, …) nie elaborowały się.
+4. `J1IsaTest` (Verilator): ALU, call/ret, jz, odczyt/zapis I/O.
+5. iCE40: Spinal ≥ 1.5 oznacza stosy jako `ram_style = "distributed"` — skrypty `.ys` zdejmują atrybut.
+6. Submodule `hw/cpu/j1` + `ProjectRef` w `hw/build.sbt`; `snake` zależy od `j1`.
 
-Zasoby: J1 to ~1–1,5 k LUT4 + pamięć w BRAM — mieści się w UP5K (5 280 LC, 30 × EBR 4 kb,
-128 KB SPRAM) i GW1NR-9 (8 640 LUT, 26 × BSRAM 18 kb).
+Pomiar: cały SoC `J1Ice` (CPU, 4 k słów RAM z Forthem, UART, timery, PWM, JTAG) na UP5K —
+2 009 / 5 280 LC (38%), 18 / 30 EBR.
+
+## Do zrobienia
+- ROM z firmware przez `inlineRom` zamiast `$readmemb` (pliki `.bin` obok `.v`).
+- `bootCode` z pliku firmware bez `sys.exit` przy braku pliku.
+- SoC gry dla Tang Nano 9K i iCESugar: J1 + LED-y/przyciski/wyświetlacz na `J1Bus`.
+- Generacja obrazu Forth w buildzie (gforth, `toolchain/forth`).

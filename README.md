@@ -15,6 +15,7 @@ hw/
   build.sbt           projekty: snake, demo-tangnano9k, demo-icesugar (+ biblioteki z lib/)
   project/            meta-build: HwBuild z lib/sbt
   lib/                submodule fpga-hw-lib (core, vertebra, ...)
+  cpu/j1/             submodule J1Sc (fork, gałąź newhope): CPU J1, pakiet j1sc
   snake/              logika niezależna od płytki: newhope.snake (gra), newhope.snake.board (ResetGen)
   demo/tangnano9k/    top, cst, Makefile
   demo/icesugar/      top, pcf, Makefile
@@ -22,19 +23,21 @@ doc/                  notatki projektowe
 ```
 
 # how to's
-## klonowanie (hw/lib to submodule: fpga-hw-lib)
+## klonowanie (submoduły: hw/lib = fpga-hw-lib, hw/cpu/j1 = J1Sc)
 ```
 git clone --recurse-submodules https://github.com/TomekBarabasz/FPGA-snake
 git config submodule.recurse true
 git config push.recurseSubmodules check
 ```
-Istniejący klon: `git submodule update --init`. Przed edycją w `hw/lib`: `git switch main`.
+Istniejący klon: `git submodule update --init`. Przed edycją w `hw/lib`: `git switch main`,
+w `hw/cpu/j1`: `git switch newhope`.
 
 ## testy i generacja (z `hw/`)
 ```
-sbt test                    # snake + plytki + testy biblioteki (aggregate hwlib)
+sbt test                    # snake + plytki + testy biblioteki i CPU (aggregate hwlib, j1)
 sbt snake/test
 sbt "{lib}core/test"        # projekty biblioteki z prefiksem {lib}
+sbt "{cpu/j1}j1/test"       # J1IsaTest (regresja ISA po porcie)
 sbt "demo-tangnano9k/runMain newhope.tangnano9k.SnakeDemoTangNano9kVerilog"
 sbt "demo-icesugar/runMain newhope.icesugar.SnakeDemoIceSugarVerilog"
 ```
@@ -59,9 +62,11 @@ from hw folder
 docker run --rm -ti -v .:/workspace -w /workspace -v .\.sbt:/sbt ghcr.io/spinalhdl/docker:master
 ```
 
-## CPU: J1Sc (planowane)
-Kandydat na sterowanie grą: [J1Sc](https://github.com/SteffenReith/J1Sc) (J1 w SpinalHDL, Forth).
-Upstream jest na Scali 2.11 / SpinalHDL 1.4.2 / sbt 0.13, bez pakietu i z własnym
-buildem dla IceBreakera/IcoBoarda, więc nie wejdzie do tego buildu bez portu
-(Scala 2.13, Spinal 1.12, `hwLayout`, pakiet). Plan: fork na koncie
-(`TomekBarabasz/J1Sc`), port w forku, submodule `hw/cpu/j1`. Szczegóły: `doc/J1Sc.md`.
+## CPU: J1Sc
+`hw/cpu/j1` to [fork J1Sc](https://github.com/TomekBarabasz/J1Sc) (gałąź `newhope`) przeniesiony
+na Scala 2.13 / SpinalHDL 1.12 — te same wersje co fpga-hw-lib, więc oba buildy ładują się
+w jednej sesji sbt. Projekt `snake` zależy od `j1` (`ProjectRef(file("cpu/j1"), "j1")`),
+klasy w pakiecie `j1sc` (`J1`, `J1Config`, peryferia).
+Zmiany względem upstreamu: `hw/cpu/j1/NEWHOPE.md`; plan i stan: `doc/J1Sc.md`.
+
+Firmware Forth (`forth16`) wymaga gforth: `cd hw/cpu/j1/toolchain/forth && make`.
