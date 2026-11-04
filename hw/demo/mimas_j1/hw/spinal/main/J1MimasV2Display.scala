@@ -79,11 +79,14 @@ class J1MimasV2Display(j1Cfg : J1Config, boardCfg : CoreConfig) extends Componen
 
 object J1MimasV2DisplayVerilog extends App {
   // run forkowany z demo/mimas_j1 (forkSettings): wynik w demo/mimas_j1/hw/gen
+  // argument: predkosc UART-u = firmware PIC-a (brak = 115200 jimmo, "19200" = fabryczny)
+  val baud = J1MimasV2.baudFromArgs(args)
+  println(s"[mimas_j1] UART $baud baud")
   val dir = "hw/gen"
   SpinalConfig(mergeAsyncProcess            = true,
                defaultConfigForClockDomains = J1MimasV2.globalClockConfig,
                targetDirectory              = dir)
-    .generateVerilog(new J1MimasV2Display(J1Config.forth16, CoreConfig.mimasV2()))
+    .generateVerilog(new J1MimasV2Display(J1Config.forth16, CoreConfig.mimasV2(baud)))
     .printPruned()
   InlineReadmem(s"$dir/J1MimasV2Display.v")
 }

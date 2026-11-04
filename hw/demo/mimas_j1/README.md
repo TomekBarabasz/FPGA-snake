@@ -1,6 +1,6 @@
 # demo/mimas_j1 — J1 + SwapForth na Mimas V2 z wyświetlaczem 7-seg
 
-Bazą jest `J1MimasV2Soc` z `cpu/j1` (J1Sc, gałąź `newhope`): CPU, UART 19200, LED-y,
+Bazą jest `J1MimasV2Soc` z `cpu/j1` (J1Sc, gałąź `newhope`): CPU, UART (115200 dla firmware'u PIC-a jimmo, 19200 dla fabrycznego), LED-y,
 DIP-y, przyciski, timery i przerwania (opis: `cpu/j1/src/main/xilinx/mimasv2/README.md`).
 Tutaj dochodzi rozszerzenie: wyświetlacz 3 × 7-seg pod adresem `0x60`, sterowany
 przez `SevenSegMux` z `lib/mimas_v2`.
@@ -58,14 +58,17 @@ Całe rozszerzenie to klasa `J1MimasV2DisplaySoc` w `hw/spinal/main/J1MimasV2Dis
 ## Budowanie i uruchomienie
 ```
 cd hw/cpu/j1/toolchain/forth && make && cd ../../..                     # obraz SwapForth (gforth)
-sbt "demo-mimas-j1/runMain newhope.mimasj1.J1MimasV2DisplayVerilog"     # z hw/ -> demo/mimas_j1/hw/gen/J1MimasV2Display.v
+sbt "demo-mimas-j1/runMain newhope.mimasj1.J1MimasV2DisplayVerilog"        # z hw/, UART 115200 -> demo/mimas_j1/hw/gen/J1MimasV2Display.v
+sbt "demo-mimas-j1/runMain newhope.mimasj1.J1MimasV2DisplayVerilog 19200"  # fabryczny firmware PIC-a
 sbt "demo-mimas-j1/test"                                                # symulacja (Verilator)
 ```
 ISE 14.7: XC6SLX9, CSG324, speed -3, top `J1MimasV2Display`, źródła
 `hw/gen/J1MimasV2Display.v` i `ucf/J1MimasV2Display.ucf`; „Create Binary
-Configuration File” → `.bin` dla konfiguratora Numato. Potem SW7 na UART i:
+Configuration File” → `.bin`. Wgranie i porty COM zależą od firmware'u PIC-a
+(`cpu/j1/src/main/xilinx/mimasv2/README.md` §0, §3). Firmware jimmo: `.bin` przez port
+z `mimas>`, a Forth na **drugim** porcie płytki:
 ```
-python3 hw/cpu/j1/toolchain/forth/j1term.py -d /dev/ttyACM0 -b 19200 hw/cpu/j1/toolchain/forth/swapforth.fs
+python3 hw/cpu/j1/toolchain/forth/j1term.py -d COM14 hw/cpu/j1/toolchain/forth/swapforth.fs     # COM = port UART FPGA
 ```
 
 ## Sprawdzone / do sprawdzenia
