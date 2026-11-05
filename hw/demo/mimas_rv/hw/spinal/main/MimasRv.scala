@@ -2,92 +2,76 @@ package newhope.mimasrv
 
 import spinal.core._
 import spinal.lib._
-import spinal.lib.bus.misc.MaskMapping
+import spinal.lib.bus.misc.{BusSlaveFactory, MaskMapping, SizeMapping}
+import spinal.lib.bus.amba4.axi._
+import spinal.lib.bus.amba4.axilite._
+import spinal.lib.bus.amba4.axilite.AxiLite4Utils._
 import scala.collection.mutable.ArrayBuffer
 import core.microrv32._
 import core.microrv32.bus._
-import core.microrv32.peripheral.{SBLED, SBShutdown}
-import core.microrv32.peripheral.uart.SBSUart
 import newhope.mcb._
-import newhope.mimas_v2.SevenSegMux
 import newhope.snake.board.InlineReadmem
 
 // =====================================================================
 //  microrv32 (RV32IM) na Mimas V2: monitor przez UART + LPDDR 64 MB.
 //
-//  Mapa pamieci (sw/mimas_rv.h):
+//  Mapa pamieci (sw/mimas_rv.h) - ta sama w obu wariantach magistrali:
 //    0x02000000  CLIC (mtime / mtimecmp)      0x02010000  Shutdown
 //    0x80000000  BRAM 16 KB, program (sw/monitor.hex)
 //    0x81000000  LED D1..D8                   0x82000000  UART 115200 8N1
 //    0x84000000  plytka: +0 DIP, +4 przyciski, +8 7-seg, +C status LPDDR
-//    0x90000000  LPDDR 64 MB (MCB, port 0, 128 b) przez SimpleBusToMig
+//    0x90000000  LPDDR 64 MB (MCB, port 0, 128 b)
+//
+//  Warianty (MimasRvConfig.bus):
+//    SimpleBus  CPU -> SimpleBusDecoder -> peryferia (SimpleBusSlaveFactory),
+//               BRAM (ByteAddressableMemory), LPDDR (SimpleBusToMig)
+//    Axi4       CPU -> SimpleBusToAxi4 -> Axi4Crossbar -> BRAM (Axi4SharedOnChipRam),
+//               2 x AXI-Lite (peryferia, AxiLite4SlaveFactory), LPDDR (Axi4ToMig)
+//  Peryferia (MimasRvPeripherals) to ten sam kod w obu wariantach.
 //
 //  Zegary: 100 MHz -> PLL w MCB -> pamiec 150 MHz, c3_clk0 = 50 MHz
 //  (cala logika, MigConfig.forClocks(150, 50)), kalibracja 60 MHz.
 // =====================================================================
 
-case class MimasRvConfig(
-  ramWords : Int = 4096,                       // 16 KB BRAM na program
-  hexFile  : String = "sw/monitor.hex",        // wzgledem demo/mimas_rv (run i test sa forkowane stamtad)
-  core     : RV32CoreConfig = RV32CoreConfig(generateMultiply = true, generateDivide = true, generateCompressed = false)
-)
-
-/** Most SimpleBus (32 b, jedno slowo naraz) -> port MCB (128 b).
-  * Dostep zawsze pojedynczym burstem (bl = 0); zapis: dane + maska bajtow na
-  * swojej pozycji w 128-bitowym slowie, potem komenda; odczyt: komenda, czekanie
-  * na dane, wybor pasa. Do kalibracji (calib = 0) nie przyjmuje transakcji -
-  * CPU stoi, dlatego monitor sprawdza najpierw status. Zakladane naturalne
-  * wyrownanie (gcc bez -mno-strict-align). */
-case class SimpleBusToMig(c : MigConfig, window : Int = 26) extends Component {
-  val io = new Bundle {
-    val sb    = slave(SimpleBus(32, 32))
-    val sel   = in Bool()
-    val calib = in Bool()
-    val port  = master(MigPort(c))
-  }
-  val laneBits = log2Up(c.bytesPerWord)                       // 4 dla 128 b
-  val addr     = io.sb.SBaddress(window - 1 downto 0)
-  val wordAddr = (addr >> laneBits) << laneBits
-  val lane     = addr(laneBits - 1 downto 0)
-
-  val sizeMask = io.sb.SBsize.mux[Bits](1 -> B"0001", 2 -> B"0011", default -> B"1111")
-  val enables  = (sizeMask.resize(c.maskWidth) << lane).resize(c.maskWidth)
-  val wrData   = (io.sb.SBwdata.resize(c.dataWidth) << (lane @@ U"000")).resize(c.dataWidth)
-
-  object S extends SpinalEnum { val IDLE, WR_DATA, WR_CMD, RD_CMD, RD_WAIT, RESP = newElement() }
-  val state = RegInit(S.IDLE)
-  val rdata = Reg(Bits(32 bits)) init 0
-
-  io.port.cmd.valid        := False
-  io.port.cmd.payload.instr := MigInstr.WRITE
-  io.port.cmd.payload.bl   := 0
-  io.port.cmd.payload.addr := wordAddr.resized
-  io.port.wr.valid         := False
-  io.port.wr.payload.data  := wrData
-  io.port.wr.payload.mask  := ~enables
-  io.port.rd.ready         := False
-  io.sb.SBready            := state === S.RESP
-  io.sb.SBrdata            := rdata
-
-  switch(state) {
-    is(S.IDLE)    { when(io.sel && io.sb.SBvalid && io.calib) { state := io.sb.SBwrite ? S.WR_DATA | S.RD_CMD } }
-    is(S.WR_DATA) { io.port.wr.valid := True; when(io.port.wr.ready) { state := S.WR_CMD } }
-    is(S.WR_CMD)  { io.port.cmd.valid := True; io.port.cmd.payload.instr := MigInstr.WRITE; when(io.port.cmd.ready) { state := S.RESP } }
-    is(S.RD_CMD)  { io.port.cmd.valid := True; io.port.cmd.payload.instr := MigInstr.READ;  when(io.port.cmd.ready) { state := S.RD_WAIT } }
-    is(S.RD_WAIT) {
-      io.port.rd.ready := True
-      when(io.port.rd.valid) {
-        val shifted = (io.port.rd.payload >> (lane @@ U"000")).resize(32)
-        rdata := io.sb.SBsize.mux[Bits](1 -> shifted(7 downto 0).resized, 2 -> shifted(15 downto 0).resized, default -> shifted)
-        state := S.RESP
-      }
-    }
-    is(S.RESP)    { state := S.IDLE }
+sealed trait MimasRvBus
+object MimasRvBus {
+  case object SimpleBus extends MimasRvBus
+  case object Axi4      extends MimasRvBus
+  def parse(s : String) : MimasRvBus = s.toLowerCase match {
+    case "simplebus" | "sb" => SimpleBus
+    case "axi4" | "axi"     => Axi4
+    case x => sys.error(s"magistrala '$x': simplebus albo axi4")
   }
 }
 
-/** SoC bez MCB: CPU, BRAM, UART, LED-y, CLIC, Shutdown, rejestry plytki i port
-  * do LPDDR. W tej samej domenie co port MCB (c3_clk0). Symulowany z modelem portu. */
+case class MimasRvConfig(
+  bus      : MimasRvBus = MimasRvBus.SimpleBus,
+  ramWords : Int = 4096,                       // 16 KB BRAM na program
+  hexFile  : String = "sw/monitor.hex",        // wzgledem demo/mimas_rv (run i test sa forkowane stamtad)
+  core     : RV32CoreConfig = RV32CoreConfig(generateMultiply = true, generateDivide = true, generateCompressed = false)
+) {
+  def ramBytes = ramWords * 4
+  /** Obraz BRAM jako slowa 32 b (format microrv32: bajty w kolejnosci adresow). */
+  def hexWords : Seq[BigInt] =
+    scala.io.Source.fromFile(hexFile).getLines().map(_.trim).filter(_.nonEmpty).map { l =>
+      BigInt(l.grouped(2).toSeq.reverse.mkString, 16)
+    }.toSeq.padTo(ramWords, BigInt(0)).take(ramWords)
+}
+
+/** Adresy peryferiow - jedno miejsce dla obu wariantow i dla sw/mimas_rv.h. */
+object MimasRvMap {
+  val clic     = 0x02000000L
+  val shutdown = 0x02010000L
+  val ram      = 0x80000000L
+  val led      = 0x81000000L
+  val uart     = 0x82000000L
+  val board    = 0x84000000L
+  val ddr      = 0x90000000L
+  val ddrBytes = 64L << 20
+}
+
+/** SoC bez MCB: CPU, BRAM, peryferia i port do LPDDR, w domenie portu MCB (c3_clk0).
+  * Symulowany z modelem portu (MimasRvSocTest), w obu wariantach magistrali. */
 class MimasRvSoc(cfg : MimasRvConfig, c : MigConfig) extends Component {
   val io = new Bundle {
     val uart    = master(spinal.lib.com.uart.Uart())
@@ -100,65 +84,94 @@ class MimasRvSoc(cfg : MimasRvConfig, c : MigConfig) extends Component {
     val faults  = in  Bits(4 bits)      // flagi bledow portu MCB
     val ddr     = master(MigPort(c))
   }
+  import MimasRvMap._
+  import MimasRvPeripherals._
 
   val cpu = new SBRV32Core(cfg.core)
-  val map = ArrayBuffer[(SimpleBus, (Bool, MaskMapping))]()
 
-  val clic = new RVCLIC()
-  map += clic.io.sb -> (clic.io.sel, MaskMapping(0x02000000L, 0xFFFF0000L))
-  cpu.io.irqTimer := clic.io.irq
-
-  val shutdown = new SBShutdown()
-  map += shutdown.io.sb -> (shutdown.io.sel, MaskMapping(0x02010000L, 0xFFFFFC00L))
-  cpu.io.halt    := shutdown.io.halt
-  cpu.io.haltErr := shutdown.io.haltErr
-
-  val ram = new ByteAddressableMemory(cfg.ramWords, cfg.hexFile)
-  map += ram.io.sb -> (ram.io.sel, MaskMapping(0x80000000L, 0xFF000000L))
-
-  val led = new SBLED()
-  map += led.io.sb -> (led.io.sel, MaskMapping(0x81000000L, 0xFFFFFFF0L))
-  io.leds := led.io.leds
-
-  val uart = new SBSUart()
-  map += uart.io.sb -> (uart.io.sel, MaskMapping(0x82000000L, 0xFFFFFF00L))
-  io.uart <> uart.io.uart
-
-  // ---- rejestry plytki: przyklad wlasnego peryferium na SimpleBus ----------
-  val board = new Area {
-    val sb  = SimpleBus(32, 32)
-    val sel = Bool()
-    map += sb -> (sel, MaskMapping(0x84000000L, 0xFFFFFF00L))
-    val busCtrl = SimpleBusSlaveFactory(sb, sel, addressBits = 8, dontCareReadData = false)
-
-    val dips    = BufferCC(io.dips, init = B(0, 8 bits))
-    val buttons = BufferCC(io.buttons, init = B(0, 6 bits))
-    busCtrl.read(dips, address = 0x0)
-    busCtrl.read(buttons, address = 0x4)
-
-    val segValue = Reg(Bits(16 bits)) init 0x0AAA          // jak w demo/mimas_j1
-    busCtrl.readAndWrite(segValue, address = 0x8)
-    val mux = SevenSegMux(clkFrequency = ClockDomain.current.frequency.getValue)
-    for (i <- 0 until 3) {
-      val n = 2 - i
-      mux.io.digits(i).code := segValue(4 * n + 3 downto 4 * n).asUInt
-      mux.io.digits(i).dot  := segValue(12 + n)
+  /** Wszystkie peryferia na dwoch fabrykach: `low` (CLIC, Shutdown) i `high`
+    * (LED, UART, plytka); `lowBase` / `highBase` to adres, pod ktorym fabryka
+    * widzi poczatek swojego okna (0 przy SimpleBus, adres bezwzgledny przy AXI-Lite). */
+  def peripherals(low : BusSlaveFactory, lowBase : BigInt, high : BusSlaveFactory, highBase : BigInt,
+                  sbHigh : Option[(BusSlaveFactory, BusSlaveFactory, BusSlaveFactory)] = None) = new Area {
+    val clic     = Clic(low, lowBase)
+    val shutdown = Shutdown(low, lowBase + (MimasRvMap.shutdown - MimasRvMap.clic))
+    val (fLed, fUart, fBoard, bLed, bUart, bBoard) = sbHigh match {
+      case Some((l, u, b)) => (l, u, b, BigInt(0), BigInt(0), BigInt(0))           // SimpleBus: osobny port na peryferium
+      case None            => (high, high, high, highBase, highBase + (MimasRvMap.uart - MimasRvMap.led),
+                                                         highBase + (MimasRvMap.board - MimasRvMap.led))
     }
-    io.seg := mux.io.seg
-    io.en  := mux.io.en
-
-    val fault = RegInit(False) setWhen io.faults.orR             // lepki
-    busCtrl.read(fault ## io.calib, address = 0xC)               // bit 0 = kalibracja, bit 1 = blad portu
+    val ledP  = Led(fLed, bLed)
+    val uartP = Uart(fUart, bUart)
+    val brd   = Board(fBoard, bBoard, io.dips, io.buttons, io.calib, io.faults)
+    cpu.io.irqTimer := clic.irq
+    cpu.io.halt     := shutdown.halt
+    cpu.io.haltErr  := shutdown.haltErr
+    io.leds := ledP.leds
+    io.uart <> uartP.uart
+    io.seg  := brd.mux.io.seg
+    io.en   := brd.mux.io.en
   }
 
-  val ddrBridge = SimpleBusToMig(c)
-  map += ddrBridge.io.sb -> (ddrBridge.io.sel, MaskMapping(0x90000000L, 0xFC000000L))
-  ddrBridge.io.calib := io.calib
-  io.ddr <> ddrBridge.io.port
+  // ---- wariant SimpleBus -------------------------------------------------------
+  val sbFabric = (cfg.bus == MimasRvBus.SimpleBus) generate new Area {
+    val map = ArrayBuffer[(SimpleBus, (Bool, MaskMapping))]()
+    /** Port dekodera + fabryka z `bits` bitami adresu lokalnego. */
+    def port(base : Long, mask : Long, bits : Int) : BusSlaveFactory = {
+      val sb = SimpleBus(32, 32); val sel = Bool()
+      map += sb -> (sel, MaskMapping(base, mask))
+      SimpleBusSlaveFactory(sb, sel, addressBits = bits, dontCareReadData = false)
+    }
+    val low   = port(clic,  0xFFFE0000L, 17)       // 0x02000000 - 0x0201FFFF: CLIC + Shutdown
+    val fLed  = port(led,   0xFFFFFFF0L, 4)
+    val fUart = port(uart,  0xFFFFFF00L, 8)
+    val fBrd  = port(board, 0xFFFFFF00L, 8)
+    val periph = peripherals(low, 0, null, 0, Some((fLed, fUart, fBrd)))
 
-  val decoder = SimpleBusDecoder(master = cpu.io.sb, decodings = map.toSeq)
-  cpu.io.unmapped := decoder.io.unmapped.fired
-  decoder.io.unmapped.clear := True
+    val ramB = new ByteAddressableMemory(cfg.ramWords, cfg.hexFile)
+    map += ramB.io.sb -> (ramB.io.sel, MaskMapping(ram, 0xFF000000L))
+
+    val ddrBridge = SimpleBusToMig(c)
+    map += ddrBridge.io.sb -> (ddrBridge.io.sel, MaskMapping(ddr, 0xFC000000L))
+    ddrBridge.io.calib := io.calib
+    io.ddr <> ddrBridge.io.port
+
+    val decoder = SimpleBusDecoder(master = cpu.io.sb, decodings = map.toSeq)
+    cpu.io.unmapped := decoder.io.unmapped.fired
+    decoder.io.unmapped.clear := True
+  }
+
+  // ---- wariant AXI4 + AXI-Lite -------------------------------------------------
+  val axiFabric = (cfg.bus == MimasRvBus.Axi4) generate new Area {
+    val axiCfg = MimasRvAxi.config
+    val bridge = SimpleBusToAxi4(axiCfg)
+    bridge.io.sb <> cpu.io.sb
+    cpu.io.unmapped := False                         // nieznany adres: crossbar odpowiada DECERR, most go pomija
+
+    val ramA = Axi4SharedOnChipRam(dataWidth = 32, byteCount = cfg.ramBytes, idWidth = axiCfg.idWidth)
+    ramA.ram.initBigInt(cfg.hexWords)
+
+    val ddrBridge = Axi4ToMig(axiCfg, c)
+    ddrBridge.io.calib := io.calib
+    io.ddr <> ddrBridge.io.port
+
+    // dwa okna AXI4 zamieniane na AXI-Lite (CPU wysyla tylko pojedyncze beaty)
+    val lowAxi  = Axi4(axiCfg)
+    val highAxi = Axi4(axiCfg)
+    val lowLite  = lowAxi.toLite()
+    val highLite = highAxi.toLite()
+    val periph = peripherals(AxiLite4SlaveFactory(lowLite), clic, AxiLite4SlaveFactory(highLite), led)
+
+    val crossbar = Axi4CrossbarFactory()
+    crossbar.addSlaves(
+      ramA.io.axi       -> SizeMapping(ram, cfg.ramBytes),
+      ddrBridge.io.axi  -> SizeMapping(ddr, ddrBytes),
+      lowAxi            -> SizeMapping(clic, 0x20000),            // CLIC + Shutdown
+      highAxi           -> SizeMapping(led, 0x04000000)           // LED, UART, plytka (0x81000000 - 0x84FFFFFF)
+    )
+    crossbar.addConnections(bridge.io.axi -> List(ramA.io.axi, ddrBridge.io.axi, lowAxi, highAxi))
+    crossbar.build()
+  }
 }
 
 /** Top plytki: MCB (PLL, kalibracja, piny LPDDR) + MimasRvSoc w domenie c3_clk0.
@@ -204,11 +217,14 @@ class MimasRv(cfg : MimasRvConfig = MimasRvConfig(),
   mcb.port.driveFrom(soc.io.ddr)
 }
 
+/** sbt "demo-mimas-rv/runMain newhope.mimasrv.MimasRvVerilog [simplebus|axi4]" */
 object MimasRvVerilog extends App {
+  val bus = args.headOption.map(MimasRvBus.parse).getOrElse(MimasRvBus.SimpleBus)
+  println(s"[mimas_rv] magistrala: $bus")
   val dir = "hw/gen"
   val top = SpinalConfig(targetDirectory = dir,
                          defaultConfigForClockDomains = ClockDomainConfig(resetKind = SYNC, resetActiveLevel = HIGH))
-    .generateVerilog(new MimasRv)
+    .generateVerilog(new MimasRv(MimasRvConfig(bus = bus)))
   InlineReadmem(s"$dir/MimasRv.v")
   println(MigConfig.forClocks(memMHz = 150, uiMHz = 50).report)
 }
