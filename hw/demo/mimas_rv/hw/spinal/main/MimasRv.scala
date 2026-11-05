@@ -19,14 +19,16 @@ import newhope.snake.board.InlineReadmem
 //    0x02000000  CLIC (mtime / mtimecmp)      0x02010000  Shutdown
 //    0x80000000  BRAM 16 KB, program (sw/monitor.hex)
 //    0x81000000  LED D1..D8                   0x82000000  UART 115200 8N1
-//    0x84000000  plytka: +0 DIP, +4 przyciski, +8 7-seg, +C status LPDDR
+//    0x84000000  plytka: +0 DIP, +4 przyciski, +8 7-seg, +C status (LPDDR, DMA)
+//    0x85000000  DMA AXI4-Stream (tylko wariant Axi4)
 //    0x90000000  LPDDR 64 MB (MCB, port 0, 128 b)
 //
 //  Warianty (MimasRvConfig.bus):
 //    SimpleBus  CPU -> SimpleBusDecoder -> peryferia (SimpleBusSlaveFactory),
 //               BRAM (ByteAddressableMemory), LPDDR (SimpleBusToMig)
 //    Axi4       CPU -> SimpleBusToAxi4 -> Axi4Crossbar -> BRAM (Axi4SharedOnChipRam),
-//               2 x AXI-Lite (peryferia, AxiLite4SlaveFactory), LPDDR (Axi4ToMig)
+//               2 x AXI-Lite (peryferia, AxiLite4SlaveFactory), LPDDR (Axi4ToMig);
+//               drugi master: Axi4StreamDma (MM2S -> Axi4StreamOp -> S2MM)
 //  Peryferia (MimasRvPeripherals) to ten sam kod w obu wariantach.
 //
 //  Zegary: 100 MHz -> PLL w MCB -> pamiec 150 MHz, c3_clk0 = 50 MHz
@@ -66,6 +68,7 @@ object MimasRvMap {
   val led      = 0x81000000L
   val uart     = 0x82000000L
   val board    = 0x84000000L
+  val dma      = 0x85000000L     // tylko wariant Axi4
   val ddr      = 0x90000000L
   val ddrBytes = 64L << 20
 }
@@ -103,7 +106,7 @@ class MimasRvSoc(cfg : MimasRvConfig, c : MigConfig) extends Component {
     }
     val ledP  = Led(fLed, bLed)
     val uartP = Uart(fUart, bUart)
-    val brd   = Board(fBoard, bBoard, io.dips, io.buttons, io.calib, io.faults)
+    val brd   = Board(fBoard, bBoard, io.dips, io.buttons, io.calib, io.faults, hasDma = cfg.bus == MimasRvBus.Axi4)
     cpu.io.irqTimer := clic.irq
     cpu.io.halt     := shutdown.halt
     cpu.io.haltErr  := shutdown.haltErr
@@ -143,8 +146,9 @@ class MimasRvSoc(cfg : MimasRvConfig, c : MigConfig) extends Component {
 
   // ---- wariant AXI4 + AXI-Lite -------------------------------------------------
   val axiFabric = (cfg.bus == MimasRvBus.Axi4) generate new Area {
-    val axiCfg = MimasRvAxi.config
-    val bridge = SimpleBusToAxi4(axiCfg)
+    val axiCfg    = MimasRvAxi.config                  // slave'y: id 4 b
+    val masterCfg = axiCfg.copy(idWidth = 2)           // mastery: id 2 b (+1 b crossbara na wybor mastera)
+    val bridge = SimpleBusToAxi4(masterCfg)
     bridge.io.sb <> cpu.io.sb
     cpu.io.unmapped := False                         // nieznany adres: crossbar odpowiada DECERR, most go pomija
 
@@ -160,16 +164,26 @@ class MimasRvSoc(cfg : MimasRvConfig, c : MigConfig) extends Component {
     val highAxi = Axi4(axiCfg)
     val lowLite  = lowAxi.toLite()
     val highLite = highAxi.toLite()
-    val periph = peripherals(AxiLite4SlaveFactory(lowLite), clic, AxiLite4SlaveFactory(highLite), led)
+    val highBus  = AxiLite4SlaveFactory(highLite)
+    val periph = peripherals(AxiLite4SlaveFactory(lowLite), clic, highBus, led)
+
+    // DMA AXI4-Stream: MM2S -> blok strumieniowy -> S2MM, rejestry pod 0x85000000
+    val dmaEngine = Axi4StreamDma(masterCfg)
+    val streamOp  = Axi4StreamOp()
+    streamOp.io.src << dmaEngine.io.mm2s
+    dmaEngine.io.s2mm << streamOp.io.dst
+    val dmaRegs = DmaRegs(highBus, dma, dmaEngine, streamOp)
 
     val crossbar = Axi4CrossbarFactory()
     crossbar.addSlaves(
       ramA.io.axi       -> SizeMapping(ram, cfg.ramBytes),
       ddrBridge.io.axi  -> SizeMapping(ddr, ddrBytes),
       lowAxi            -> SizeMapping(clic, 0x20000),            // CLIC + Shutdown
-      highAxi           -> SizeMapping(led, 0x04000000)           // LED, UART, plytka (0x81000000 - 0x84FFFFFF)
+      highAxi           -> SizeMapping(led, 0x05000000)           // LED, UART, plytka, DMA (0x81000000 - 0x85FFFFFF)
     )
-    crossbar.addConnections(bridge.io.axi -> List(ramA.io.axi, ddrBridge.io.axi, lowAxi, highAxi))
+    crossbar.addConnections(
+      bridge.io.axi    -> List(ramA.io.axi, ddrBridge.io.axi, lowAxi, highAxi),
+      dmaEngine.io.axi -> List(ramA.io.axi, ddrBridge.io.axi))      // DMA widzi BRAM i LPDDR
     crossbar.build()
   }
 }

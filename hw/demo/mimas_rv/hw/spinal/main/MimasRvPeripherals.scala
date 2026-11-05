@@ -83,9 +83,10 @@ object MimasRvPeripherals {
   }
 
   /** Rejestry plytki: +0 DIP (1 = ON), +4 przyciski, +8 wyswietlacz 7-seg
-    * (jak demo/mimas_j1), +C status LPDDR (bit 0 = skalibrowana, bit 1 = blad portu MCB). */
+    * (jak demo/mimas_j1), +C status: bit 0 = LPDDR skalibrowana, bit 1 = blad portu
+    * MCB, bit 2 = jest DMA (wariant Axi4). */
   case class Board(bus : BusSlaveFactory, base : BigInt,
-                   dipsIn : Bits, buttonsIn : Bits, calib : Bool, faults : Bits) extends Area {
+                   dipsIn : Bits, buttonsIn : Bits, calib : Bool, faults : Bits, hasDma : Boolean) extends Area {
     val dips    = BufferCC(dipsIn, init = B(0, widthOf(dipsIn) bits))
     val buttons = BufferCC(buttonsIn, init = B(0, widthOf(buttonsIn) bits))
     bus.read(dips, base + 0x0)
@@ -101,6 +102,6 @@ object MimasRvPeripherals {
     }
 
     val fault = RegInit(False) setWhen faults.orR            // lepki
-    bus.read(fault ## calib, base + 0xC)
+    bus.read(Bool(hasDma) ## fault ## calib, base + 0xC)
   }
 }
