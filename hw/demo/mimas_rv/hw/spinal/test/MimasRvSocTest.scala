@@ -7,7 +7,7 @@ import scala.collection.mutable
 import newhope.mcb._
 
 // =====================================================================
-//  MimasRvSoc z prawdziwym sw/monitor.hex: polecenia monitora przez UART
+//  MimasRvSoc (oba warianty magistrali) z prawdziwym sw/monitor.hex: polecenia monitora przez UART
 //  (115200, 50 MHz) i model portu MCB w miejscu LPDDR.
 //
 //  Model portu: pamiec 128-bitowych slow (Map), cmd/wr zawsze gotowe,
@@ -15,7 +15,62 @@ import newhope.mcb._
 //  dane po `latency` taktach na rd (FIFO first-word-fall-through jak MCB).
 //  MCB i jego kalibracji symulacja nie pokazuje - to sprawdza dopiero plytka.
 // =====================================================================
-class MimasRvSocTest extends AnyFunSuite {
+/** Model portu MCB w symulacji: pamiec slow 128 b, cmd/wr zawsze gotowe, zapis = slowo
+  * z kolejki wr z maska (1 = bajt pominiety), odczyt = `bl + 1` slow na rd po `latency`
+  * taktach (FIFO first-word-fall-through jak MCB). Pilnuje regul portu: dane zapisu
+  * w kolejce przed komenda, nie wiecej niz 64 slowa w FIFO odczytu, burst <= 64 slowa
+  * i w obrebie wiersza 2 kB. */
+object MigPortModel {
+  def apply(p : MigPort, cd : ClockDomain, mem : mutable.Map[Long, BigInt], latency : Int,
+            onCmd : (Int, Long, Int) => Unit = (_, _, _) => ()) : Unit = {
+    val wrQ = mutable.Queue[(BigInt, BigInt)]()
+    val rdQ = mutable.Queue[(Long, BigInt)]()                               // (takt gotowosci, dane)
+    var t = 0L
+    p.cmd.ready #= true
+    p.wr.ready  #= true
+    p.rd.valid  #= false
+    // onSamplings: odczyty widza stan sprzed zbocza niezaleznie od kolejnosci watkow
+    // symulacji, przypisania obowiazuja od nastepnego taktu.
+    cd.onSamplings {
+      t += 1
+      if (p.wr.valid.toBoolean) wrQ += (p.wr.payload.data.toBigInt -> p.wr.payload.mask.toBigInt)
+      if (p.rd.valid.toBoolean && p.rd.ready.toBoolean) rdQ.dequeue()
+      if (p.cmd.valid.toBoolean) {
+        val a  = p.cmd.payload.addr.toLong
+        val bl = p.cmd.payload.bl.toInt + 1
+        onCmd(p.cmd.payload.instr.toInt, a, bl)
+        assert(a % 16 == 0, f"adres komendy 0x$a%x niewyrownany do 16 B")
+        assert(a / 2048 == (a + 16 * bl - 1) / 2048, f"burst $bl slow od 0x$a%x przecina wiersz 2 kB")
+        p.cmd.payload.instr.toInt match {
+          case 0 =>                                                         // WRITE
+            assert(wrQ.size >= bl, s"WRITE bl=$bl, w kolejce ${wrQ.size} slow (wr_underrun)")
+            for (k <- 0 until bl) {
+              val (data, mask) = wrQ.dequeue()
+              var w = mem(a + 16 * k)
+              for (b <- 0 until 16 if !mask.testBit(b)) {
+                val byte = (data >> (8 * b)) & 0xff
+                w = (w & ~(BigInt(0xff) << (8 * b))) | (byte << (8 * b))
+              }
+              mem(a + 16 * k) = w
+            }
+          case 1 =>                                                         // READ
+            assert(rdQ.size + bl <= 64, s"READ bl=$bl przy ${rdQ.size} slowach w FIFO (rd_overflow)")
+            for (k <- 0 until bl) rdQ += ((t + latency + k) -> mem(a + 16 * k))
+          case x => assert(false, s"nieoczekiwana komenda $x")
+        }
+      }
+      val ready = rdQ.headOption.exists(_._1 <= t)
+      p.rd.valid #= ready
+      if (ready) p.rd.payload #= rdQ.head._2
+    }
+  }
+}
+
+/** Ten sam monitor i te same testy dla obu wariantow magistrali. */
+class MimasRvSocSimpleBusTest extends MimasRvSocTest(MimasRvBus.SimpleBus)
+class MimasRvSocAxi4Test      extends MimasRvSocTest(MimasRvBus.Axi4)
+
+abstract class MimasRvSocTest(bus : MimasRvBus) extends AnyFunSuite {
   val c       = MigConfig.forClocks(memMHz = 150, uiMHz = 50)
   val bitCyc  = (50e6 / 115200).round.toInt
   val latency = 12
@@ -23,8 +78,8 @@ class MimasRvSocTest extends AnyFunSuite {
   lazy val compiled = SimConfig
     .withConfig(SpinalConfig(defaultClockDomainFrequency = FixedFrequency(50 MHz),
                              defaultConfigForClockDomains = ClockDomainConfig(resetKind = SYNC, resetActiveLevel = HIGH)))
-    .withVerilator.workspacePath("simWorkspace").workspaceName("mimas_rv_soc")
-    .compile(new MimasRvSoc(MimasRvConfig(), c))
+    .withVerilator.workspacePath("simWorkspace").workspaceName(s"mimas_rv_soc_$bus")
+    .compile(new MimasRvSoc(MimasRvConfig(bus = bus), c))
 
   class Session(val d : MimasRvSoc, calib : Boolean) {
     val cd  = d.clockDomain
@@ -32,41 +87,7 @@ class MimasRvSocTest extends AnyFunSuite {
     val mem = mutable.Map[Long, BigInt]().withDefaultValue(BigInt(0))     // adres bajtowy slowa 128 b -> dane
     var cmds = 0
 
-    // ---- model portu MCB ----
-    fork {
-      val wrQ = mutable.Queue[(BigInt, BigInt)]()
-      val rdQ = mutable.Queue[(Long, BigInt)]()                             // (takt gotowosci, dane)
-      var t = 0L
-      d.io.ddr.cmd.ready #= true
-      d.io.ddr.wr.ready  #= true
-      d.io.ddr.rd.valid  #= false
-      while (true) {
-        cd.waitSampling(); t += 1
-        if (d.io.ddr.wr.valid.toBoolean) wrQ += (d.io.ddr.wr.payload.data.toBigInt -> d.io.ddr.wr.payload.mask.toBigInt)
-        if (d.io.ddr.rd.valid.toBoolean && d.io.ddr.rd.ready.toBoolean) rdQ.dequeue()
-        if (d.io.ddr.cmd.valid.toBoolean) {
-          cmds += 1
-          val a = d.io.ddr.cmd.payload.addr.toLong
-          assert(d.io.ddr.cmd.payload.bl.toInt == 0)
-          d.io.ddr.cmd.payload.instr.toInt match {
-            case 0 =>                                                       // WRITE
-              assert(wrQ.nonEmpty, "WRITE bez danych w kolejce (wr_underrun)")
-              val (data, mask) = wrQ.dequeue()
-              var w = mem(a)
-              for (b <- 0 until 16 if !mask.testBit(b)) {
-                val byte = (data >> (8 * b)) & 0xff
-                w = (w & ~(BigInt(0xff) << (8 * b))) | (byte << (8 * b))
-              }
-              mem(a) = w
-            case 1 => rdQ += ((t + latency) -> mem(a))                      // READ
-            case x => fail(s"nieoczekiwana komenda $x")
-          }
-        }
-        val ready = rdQ.headOption.exists(_._1 <= t)
-        d.io.ddr.rd.valid #= ready
-        if (ready) d.io.ddr.rd.payload #= rdQ.head._2
-      }
-    }
+    MigPortModel(d.io.ddr, cd, mem, latency, (_, _, _) => cmds += 1)
     // ---- UART ----
     fork {
       while (true) {
