@@ -11,7 +11,8 @@ z `lib/mimas_v2/.../mcb` (`McbCore`), dostępne dla CPU jak zwykła pamięć pod
 | `80000000` | BRAM 16 KB: program (`sw/monitor.hex`), stos na końcu |
 | `81000000` | LED D1..D8 |
 | `82000000` | UART 115200 8N1 (`+0` dane TX, `+4` start/gotowość TX, `+8` dane RX, `+14` RX pusty) |
-| `84000000` | płytka: `+0` DIP (1 = ON), `+4` przyciski SW1..SW6, `+8` 7-seg, `+C` status LPDDR |
+| `84000000` | płytka: `+0` DIP (1 = ON), `+4` przyciski SW1..SW6, `+8` 7-seg, `+C` status (bit 0 LPDDR skalibrowana, 1 błąd MCB, 2 jest DMA) |
+| `85000000` | DMA AXI4-Stream (tylko wariant AXI4), rejestry niżej |
 | `90000000` | **LPDDR 64 MB** (bit 0 statusu = skalibrowana, bit 1 = błąd portu MCB) |
 
 Rejestr 7-seg jak w `demo/mimas_j1`: bity 11..8 / 7..4 / 3..0 = cyfry od lewej, 14..12 = kropki,
@@ -27,6 +28,8 @@ rv> st                     LPDDR: skalibrowana
 rv> w 90000000 deadbeef    zapis słowa (też wb ADDR VAL - bajt)
 rv> r 90000000 4           odczyt 4 słów
 rv> mt 400                 test LPDDR 1 MB (KB w hex): wynik i czas zapisu/odczytu
+rv> dma 90000000 90100000 1000 1 ffffffff   DMA 4 KB z XOR (wariant AXI4)
+rv> dt 40                  test DMA 64 KB: CPU wypełnia, DMA kopiuje z XOR, CPU sprawdza, czasy
 ```
 Liczby w hex. Dowolny terminal (PuTTY, picocom); `j1term.py` tu nie pasuje — to nie Forth.
 Firmware PIC-a jimmo: drugi port COM płytki (nie ten z `mimas>`). Fabryczny firmware
@@ -58,6 +61,37 @@ Axi4:       microrv32 ─SimpleBus─► SimpleBusToAxi4 ─AXI4─► Axi4Cross
   Nieobsługiwane (jak INCR): FIXED, WRAP, wąskie bursty. CPU burstów nie robi — ćwiczy je test.
 - **AXI-Lite** przez `Axi4.toLite()` (`AxiLite4Utils`): to tylko przepięcie sygnałów, poprawne dla
   pojedynczych beatów (CPU innych nie wysyła).
+
+## Etap 2: DMA AXI4-Stream (wariant AXI4)
+AXI4-Stream nie ma adresów — to strumień beatów (`tdata`, `tkeep`: które bajty są ważne,
+`tlast`: koniec pakietu) z `valid`/`ready`. Do pamięci prowadzą go dwa silniki
+`Axi4StreamDma` (`MimasRvDma.scala`), jak w AXI DMA Xilinxa, jako **drugi master** na crossbarze
+(widzi BRAM i LPDDR; crossbar arbitruje między nim a CPU):
+
+```
+                 ┌────────── Axi4StreamDma (master AXI4) ──────────┐
+pamięć ─AXI4 R─► │ MM2S ─AXI4-Stream─► Axi4StreamOp ─AXI4-Stream─► S2MM │ ─AXI4 AW/W─► pamięć
+                 └─────────── rejestry: DmaRegs (AXI-Lite, 0x85000000) ───┘
+```
+- **MM2S** (pamięć → strumień): bursty odczytu do 32 beatów, nigdy przez granicę 4 kB,
+  beaty `R` prosto na strumień (backpressure: `RREADY` = `TREADY`), `tlast` na ostatnim beacie.
+- **S2MM** (strumień → pamięć): beaty zbierane w FIFO w burst, dopiero potem `AW` + `W`
+  (adres i długość burstu znane z góry); `tkeep` → `WSTRB`; kończy na `tlast` albo po długości bufora.
+- **Axi4StreamOp**: blok na strumieniu — kopia, XOR albo dodawanie stałej do słowa;
+  liczy beaty i sumę słów.
+
+| Adres | Rejestr |
+| --- | --- |
+| `+00` / `+04` / `+08` | MM2S: adres, bajty, start (zapis) / zajęty (odczyt bit 0) |
+| `+10` / `+14` / `+18` | S2MM: adres, miejsce w buforze, start / zajęty |
+| `+1C` | S2MM: bajty zapisane (do `tlast`) |
+| `+20` / `+24` | op (0 kopia, 1 XOR, 2 dodaj) / argument |
+| `+28` / `+2C` | beaty przez blok (zapis = zerowanie) / suma słów |
+
+Najpierw start S2MM (czeka na strumień), potem MM2S — tak robi `dma_run()` w `sw/monitor.c`.
+W symulacji (model MCB) `dt 4` daje: CPU zapis 4 KB ok. 2 ms, **DMA kopia + XOR 60 µs**,
+CPU odczyt ok. 1,4 ms — bursty kontra pojedyncze dostępy CPU. Na płytce liczby będą inne
+(model MCB ma stałe opóźnienie).
 
 ## Budowanie
 ```
@@ -102,13 +136,25 @@ Inny program: podmień `monitor.c` albo `MimasRvConfig(hexFile = ...)`; musi si�
   na B/R): pojedyncze beaty na każdym pasie, burst 256 beatów = 1 komenda 64 słów, burst od środka
   słowa (64 + 1) i przez granicę wiersza 2 kB, 200 losowych burstów z losowym `WSTRB` vs referencja,
   brak przyjmowania AW/AR przed kalibracją.
+- `Axi4StreamDmaTest` (model pamięci `AxiMemorySim` ze spinal.lib, monitor pilnuje burstów ≤ 32
+  i bez przecinania 4 kB): MM2S z `tlast` przez granicę 4 kB, S2MM z `tkeep` i końcem na `tlast`,
+  S2MM bez `tlast` (koniec po długości, reszta strumienia czeka), pętla kopiowania z losowymi
+  długościami i adresami.
+- Monitor w wariancie AXI4: `dma` LPDDR → XOR → LPDDR (wynik sprawdzony w modelu MCB, suma
+  kontrolna), `dma` BRAM → LPDDR, `dt 4` → OK; w wariancie SimpleBus `dma` odpowiada komunikatem.
 - yosys `synth_xilinx -family xc6s -flatten` (sam SoC, bez MCB):
 
   | Wariant | LUT | FF | RAMB16 | RAM32M |
   | --- | ---: | ---: | ---: | ---: |
   | SimpleBus | ok. 3 020 | 1 130 | 8 | 14 |
-  | AXI4 + AXI-Lite | ok. 3 070 | 1 630 | 8 | 22 |
+  | AXI4 + AXI-Lite + DMA | ok. 4 040 | 2 150 | 8 | 30 |
 
-  Z soft-kalibracją MCB (~300 LUT) ok. 58–59% XC6SLX9.
+  Z soft-kalibracją MCB (~300 LUT): SimpleBus ok. 58%, AXI4 + DMA ok. 76% XC6SLX9 — blisko
+  80%, od których na Spartanie-6 routing zaczyna boleć. Dalsze rozszerzenia w wariancie AXI4
+  najpierw sprawdzić syntezą.
+- **Testbench (nauczka)**: odczyty sygnałów zaraz po `waitSampling` z kilku wątków potrafią
+  złożyć wartości sprzed i po zboczu (inny wątek już coś przypisał). Kanały AXI sterują więc
+  `StreamDriver` / `StreamMonitor` / `StreamReadyRandomizer`, a modele i liczniki stanu siedzą
+  w `onSamplings`. Wejścia ustawiać **przed** zdjęciem resetu — sim losuje wartości początkowe.
 - **Na płytce nie uruchamiane**: timing w ISE przy 50 MHz (rdzeń + most), kalibracja MCB
   przy 150 MHz (voice-changer działał z tymi samymi pinami i ograniczeniami przy 150 MHz / 75 MHz UI).

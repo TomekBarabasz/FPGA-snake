@@ -6,6 +6,8 @@
 //   sw                   DIP-y i przyciski
 //   st                   stan LPDDR (kalibracja, bledy)
 //   mt [KB]              test LPDDR (domyslnie 64 KB), czas z mtime
+//   dma SRC DST LEN [OP [ARG]]   DMA: MM2S z SRC -> op -> S2MM do DST (wariant AXI4)
+//   dt [KB]              test DMA: CPU wypelnia, DMA kopiuje z XOR, CPU sprawdza
 // Liczby szesnastkowo, z "0x" lub bez.
 #include "mimas_rv.h"
 
@@ -41,10 +43,10 @@ static void readline(void) {
 }
 
 // tokeny z linii
-static char *argv_[4]; static int argc_;
+static char *argv_[6]; static int argc_;
 static void split(void) {
     argc_ = 0;
-    for (char *p = line; *p && argc_ < 4; ) {
+    for (char *p = line; *p && argc_ < 6; ) {
         while (*p == ' ') *p++ = 0;
         if (!*p) break;
         argv_[argc_++] = p;
@@ -100,9 +102,53 @@ static void memtest(uint32_t kb) {
     puts_(", odczyt "); putdec((t2 - t1) / (CPU_HZ / 1000000u)); puts_(" us\n");
 }
 
+static int dma_ready(void) {
+    if (BOARD_STATUS & 4) return 1;
+    puts_("DMA tylko w wariancie AXI4\n");
+    return 0;
+}
+
+// DMA: najpierw S2MM (czeka na strumien), potem MM2S; zwraca takty do konca obu
+static uint32_t dma_run(uint32_t src, uint32_t dst, uint32_t len, uint32_t op, uint32_t arg) {
+    DMA_OP = op; DMA_ARG = arg; DMA_BEATS = 0;
+    DMA_S2MM_ADDR = dst; DMA_S2MM_LEN = len; DMA_S2MM_CTRL = 1;
+    uint32_t t0 = MTIME_LO;
+    DMA_MM2S_ADDR = src; DMA_MM2S_LEN = len; DMA_MM2S_CTRL = 1;
+    while ((DMA_MM2S_CTRL & 1) || (DMA_S2MM_CTRL & 1)) ;
+    return MTIME_LO - t0;
+}
+
+static void dmatest(uint32_t kb) {
+    if (!dma_ready() || !ddr_ready()) return;
+    if (kb == 0 || kb > 4096) kb = 4096;
+    uint32_t words = kb * 256, err = 0;
+    volatile uint32_t *src = (volatile uint32_t *)(DDR_BASE + 0x0100000u);
+    volatile uint32_t *dst = (volatile uint32_t *)(DDR_BASE + 0x0800000u);
+    uint32_t t0 = MTIME_LO;
+    for (uint32_t i = 0; i < words; i++) src[i] = i * 0x01000193u + 7;
+    uint32_t tFill = MTIME_LO - t0;
+    uint32_t tDma = dma_run((uint32_t)src, (uint32_t)dst, words * 4, 1, 0xFFFFFFFFu);
+    t0 = MTIME_LO;
+    for (uint32_t i = 0; i < words; i++) {
+        uint32_t want = ~(i * 0x01000193u + 7), got = dst[i];
+        if (got != want && err++ < 8) {
+            puts_("  blad @"); puthex((uint32_t)&dst[i], 8);
+            puts_(": jest "); puthex(got, 8); puts_(", ma byc "); puthex(want, 8); puts_("\n");
+        }
+    }
+    uint32_t tCheck = MTIME_LO - t0;
+    if (DMA_S2MM_DONE != words * 4) { err++; puts_("  S2MM zapisal "); puthex(DMA_S2MM_DONE, 8); puts_(" B\n"); }
+    putdec(kb); puts_(" KB: ");
+    if (err) { putdec(err); puts_(" BLEDOW"); } else puts_("OK");
+    puts_(", CPU zapis "); putdec(tFill / (CPU_HZ / 1000000u));
+    puts_(" us, DMA kopia+XOR "); putdec(tDma / (CPU_HZ / 1000000u));
+    puts_(" us, CPU odczyt "); putdec(tCheck / (CPU_HZ / 1000000u)); puts_(" us\n");
+}
+
 static void help(void) {
     puts_("r ADDR [N] | w ADDR VAL | wb ADDR VAL | led VAL | seg VAL | sw | st | mt [KB]\n"
-          "RAM 80000000 (16 KB), LED 81000000, UART 82000000, BOARD 84000000, LPDDR 90000000 (64 MB)\n");
+          "dma SRC DST LEN [OP [ARG]] | dt [KB]   (DMA: wariant AXI4; OP 0 kopia, 1 xor, 2 add)\n"
+          "RAM 80000000 (16 KB), LED 81000000, UART 82000000, BOARD 84000000, DMA 85000000, LPDDR 90000000 (64 MB)\n");
 }
 
 int main(void) {
@@ -143,9 +189,20 @@ int main(void) {
         else if (streq(c, "st")) {
             uint32_t s = BOARD_STATUS;
             puts_("LPDDR: "); puts_(s & 1 ? "skalibrowana" : "brak kalibracji");
-            puts_(s & 2 ? ", BLAD portu MCB\n" : "\n");
+            puts_(s & 2 ? ", BLAD portu MCB" : "");
+            puts_(s & 4 ? ", DMA\n" : "\n");
         }
         else if (streq(c, "mt")) { if (!hexarg(1, &n)) n = 0x40; memtest(n); }
+        else if (streq(c, "dma") && hexarg(1, &a) && hexarg(2, &v) && hexarg(3, &n)) {
+            if (!dma_ready()) continue;
+            uint32_t op = 0, arg = 0;
+            hexarg(4, &op); hexarg(5, &arg);
+            if ((is_ddr(a) || is_ddr(v)) && !ddr_ready()) continue;
+            uint32_t t = dma_run(a, v, n, op, arg);
+            puts_("DMA "); putdec(DMA_S2MM_DONE); puts_(" B, "); putdec(t / (CPU_HZ / 1000000u));
+            puts_(" us, beaty "); putdec(DMA_BEATS); puts_(", suma "); puthex(DMA_SUM, 8); puts_("\n");
+        }
+        else if (streq(c, "dt")) { if (!hexarg(1, &n)) n = 0x40; dmatest(n); }
         else puts_("? (help)\n");
     }
 }

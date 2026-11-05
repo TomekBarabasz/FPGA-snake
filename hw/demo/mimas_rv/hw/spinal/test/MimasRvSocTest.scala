@@ -74,6 +74,7 @@ abstract class MimasRvSocTest(bus : MimasRvBus) extends AnyFunSuite {
   val c       = MigConfig.forClocks(memMHz = 150, uiMHz = 50)
   val bitCyc  = (50e6 / 115200).round.toInt
   val latency = 12
+  val dmaSuffix = if (bus == MimasRvBus.Axi4) ", DMA" else ""
 
   lazy val compiled = SimConfig
     .withConfig(SpinalConfig(defaultClockDomainFrequency = FixedFrequency(50 MHz),
@@ -162,7 +163,7 @@ abstract class MimasRvSocTest(bus : MimasRvBus) extends AnyFunSuite {
       assert(s.mem(0x10L) == (BigInt(0xdeadbeefL) << 32))                    // pas 1 slowa 128 b pod 0x10
       s.cmd("wb 90000017 77")
       assert(s.cmd("r 90000014") == "90000014: 77adbeef")
-      assert(s.cmd("st") == "LPDDR: skalibrowana")
+      assert(s.cmd("st") == "LPDDR: skalibrowana" + dmaSuffix)
     }
   }
 
@@ -176,8 +177,54 @@ abstract class MimasRvSocTest(bus : MimasRvBus) extends AnyFunSuite {
 
   test("bez kalibracji: monitor nie wisi na LPDDR") {
     session(calib = false) { s =>
-      assert(s.cmd("st") == "LPDDR: brak kalibracji")
+      assert(s.cmd("st") == "LPDDR: brak kalibracji" + dmaSuffix)
       assert(s.cmd("r 90000000") == "LPDDR nie jest skalibrowana (st)")
+    }
+  }
+
+  // ---- DMA AXI4-Stream (etap 2): tylko wariant Axi4 ----------------------------
+  if (bus == MimasRvBus.Axi4) {
+    test("dma: LPDDR -> XOR -> LPDDR (1 KB), wynik w modelu MCB") {
+      session() { s =>
+        val words = (0 until 256).map(i => (0x13570000L + 3 * i) & 0xFFFFFFFFL)
+        for ((w, i) <- words.zipWithIndex) {                        // zrodlo wprost do modelu: slowa 128 b
+          val a = (4L * i) & ~15L; val sh = 32 * (i % 4)
+          s.mem(a) = (s.mem(a) & ~(BigInt(0xFFFFFFFFL) << sh)) | (BigInt(w) << sh)
+        }
+        val r = s.cmd("dma 90000000 90001000 400 1 ffffffff")
+        assert(r.startsWith("DMA 1024 B,") && r.contains("beaty 256"), r)
+        for (i <- 0 until 256) {
+          val got = (s.mem(0x1000L + ((4L * i) & ~15L)) >> (32 * (i % 4))) & 0xFFFFFFFFL
+          assert(got == (~words(i) & 0xFFFFFFFFL), f"slowo $i: 0x$got%08x")
+        }
+        val sum = words.map(w => ~w & 0xFFFFFFFFL).sum & 0xFFFFFFFFL
+        assert(r.endsWith(f"suma $sum%08x"), r)
+      }
+    }
+
+    test("dma: BRAM (program) -> LPDDR, DMA widzi obie pamieci") {
+      session() { s =>
+        val r = s.cmd("dma 80000000 90002000 40")
+        assert(r.startsWith("DMA 64 B,"), r)
+        val hex = scala.io.Source.fromFile("sw/monitor.hex").getLines().take(16).toSeq
+        for ((l, i) <- hex.zipWithIndex) {
+          val want = BigInt(l.trim.grouped(2).toSeq.reverse.mkString, 16)
+          val got  = (s.mem(0x2000L + ((4L * i) & ~15L)) >> (32 * (i % 4))) & 0xFFFFFFFFL
+          assert(got == want, s"slowo $i")
+        }
+      }
+    }
+
+    test("dt 4: CPU wypelnia, DMA kopiuje z XOR, CPU sprawdza") {
+      session() { s =>
+        val r = s.cmd("dt 4")
+        assert(r.startsWith("4 KB: OK"), r)
+        println(s"[MimasRvSocTest] dt 4: $r")
+      }
+    }
+  } else {
+    test("dma w wariancie SimpleBus: komunikat zamiast zawieszenia") {
+      session() { s => assert(s.cmd("dma 90000000 90001000 40") == "DMA tylko w wariancie AXI4") }
     }
   }
 }
