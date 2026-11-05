@@ -6,3 +6,7 @@
 	path = hw/cpu/j1
 	url = https://github.com/TomekBarabasz/J1Sc
 	branch = newhope
+[submodule "hw/cpu/microrv32"]
+	path = hw/cpu/microrv32
+	url = https://github.com/TomekBarabasz/microrv32
+	branch = newhope

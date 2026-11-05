@@ -2,7 +2,8 @@
 //   snake/        logika niezalezna od plytki (gra, VGA/HDMI, sterowanie)
 //   cpu/j1/       CPU J1 (submodule, fork J1Sc)
 //   demo/<plytka> top-levele per plytka: tangnano9k (GW1NR-9), icesugar (iCE40UP5K),
-//                 mimas_j1 (Mimas V2: J1 + SwapForth + 7-seg)
+//                 mimas_j1 (Mimas V2: J1 + SwapForth + 7-seg),
+//                 mimas_rv (Mimas V2: microrv32 + monitor UART + LPDDR)
 // Biblioteki: submodule lib/ (github.com/TomekBarabasz/fpga-hw-lib), wciagane
 // ze zrodel jako osobny build sbt (ProjectRef) - edycja w lib/ jest widoczna
 // od razu, bez publishLocal.
@@ -27,6 +28,11 @@ lazy val mimas_v2 = libRef("mimas_v2")
 // Testy CPU: sbt "{cpu/j1}j1/test".
 lazy val j1       = ProjectRef(file("cpu/j1"), "j1")
 lazy val j1boards = ProjectRef(file("cpu/j1"), "boards")   // SoC-e plytek, m.in. J1MimasV2Soc
+
+// ---- CPU: submodule cpu/microrv32 (fork microrv32, galaz newhope) ----
+// RV32IMC w SpinalHDL (agra-uni-bremen), port na Spinal 1.12 / Scala 2.13.
+// Regresja riscv-tests: sbt "{cpu/microrv32/microrv32}microrv32/test".
+lazy val microrv32 = ProjectRef(file("cpu/microrv32/microrv32"), "microrv32")
 
 // ---- logika gry (niezalezna od plytki) -----------------------------------------
 
@@ -56,7 +62,14 @@ lazy val mimasJ1 = Project("demo-mimas-j1", file("demo/mimas_j1"))
             Compile / run / envVars += "J1SCBASE" -> j1Base.getPath)
   .dependsOn(core, j1boards, mimas_v2)
 
+// microrv32 + monitor przez UART + LPDDR (MCB z lib/mimas_v2) na Mimas V2.
+// Program (sw/monitor.hex) wpisywany do BRAM przy generacji.
+lazy val mimasRv = Project("demo-mimas-rv", file("demo/mimas_rv"))
+  .settings(hwLayout, forkSettings, libraryDependencies ++= spinal, publish / skip := true,
+            libraryDependencies += scalatest % Test)
+  .dependsOn(core, snake, microrv32, mimas_v2)
+
 // test z hw/ odpala tez testy bibliotek i CPU (aggregate hwlib, j1).
 lazy val root = (project in file("."))
-  .aggregate(hwlib, j1, snake, tangnano9k, icesugar, mimasJ1)
+  .aggregate(hwlib, j1, snake, tangnano9k, icesugar, mimasJ1, mimasRv)
   .settings(publish / skip := true)

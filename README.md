@@ -16,15 +16,17 @@ hw/
   project/            meta-build: HwBuild z lib/sbt
   lib/                submodule fpga-hw-lib (core, vertebra, ...)
   cpu/j1/             submodule J1Sc (fork, gałąź newhope): CPU J1, pakiet j1sc
+  cpu/microrv32/      submodule microrv32 (fork, gałąź newhope): RISC-V RV32IMC, pakiet core.microrv32
   snake/              logika niezależna od płytki: newhope.snake (gra), newhope.snake.board (ResetGen)
   demo/tangnano9k/    top, cst, Makefile
   demo/icesugar/      top, pcf, Makefile
   demo/mimas_j1/      Mimas V2: J1 + SwapForth + wyświetlacz 7-seg (poligon rozszerzeń J1)
+  demo/mimas_rv/      Mimas V2: microrv32 + monitor przez UART + LPDDR 64 MB (MCB)
 doc/                  notatki projektowe
 ```
 
 # how to's
-## klonowanie (submoduły: hw/lib = fpga-hw-lib, hw/cpu/j1 = J1Sc)
+## klonowanie (submoduły: hw/lib = fpga-hw-lib, hw/cpu/j1 = J1Sc, hw/cpu/microrv32 = microrv32)
 ```
 git clone --recurse-submodules https://github.com/TomekBarabasz/FPGA-snake
 git config submodule.recurse true
@@ -39,6 +41,7 @@ sbt test                    # snake + plytki + testy biblioteki i CPU (aggregate
 sbt snake/test
 sbt "{lib}core/test"        # projekty biblioteki z prefiksem {lib}
 sbt "{cpu/j1}j1/test"       # J1IsaTest (regresja ISA po porcie)
+sbt "{cpu/microrv32/microrv32}microrv32/test"   # riscv-tests (48) rdzenia microrv32
 sbt "demo-tangnano9k/runMain newhope.tangnano9k.SnakeDemoTangNano9kVerilog"
 sbt "demo-icesugar/runMain newhope.icesugar.SnakeDemoIceSugarVerilog"
 ```
@@ -71,3 +74,8 @@ klasy w pakiecie `j1sc` (`J1`, `J1Config`, peryferia).
 Zmiany względem upstreamu: `hw/cpu/j1/NEWHOPE.md`; plan i stan: `doc/J1Sc.md`.
 
 Firmware Forth (`forth16`) wymaga gforth: `cd hw/cpu/j1/toolchain/forth && make`.
+
+## CPU: microrv32 (RISC-V)
+`hw/cpu/microrv32` to [fork microrv32](https://github.com/TomekBarabasz/microrv32) (gałąź `newhope`,
+RV32IMC w SpinalHDL, Uni Bremen) przeniesiony na Scala 2.13 / Spinal 1.12; zmiany w
+`hw/cpu/microrv32/NEWHOPE.md`. Użycie: `hw/demo/mimas_rv` (monitor przez UART + LPDDR).
