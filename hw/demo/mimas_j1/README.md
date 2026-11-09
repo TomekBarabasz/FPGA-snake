@@ -60,7 +60,7 @@ Całe rozszerzenie to klasa `J1MimasV2DisplaySoc` w `hw/spinal/main/J1MimasV2Dis
 cd hw/cpu/j1/toolchain/forth && make && cd ../../..                     # obrazy SwapForth (gforth): nuc.binary i nuc-mul.binary
 sbt "demo-mimas-j1/runMain newhope.mimasj1.J1MimasV2DisplayVerilog"        # z hw/, UART 115200 -> demo/mimas_j1/hw/gen/J1MimasV2Display.v
 sbt "demo-mimas-j1/runMain newhope.mimasj1.J1MimasV2DisplayVerilog 19200"  # fabryczny firmware PIC-a
-sbt "demo-mimas-j1/runMain newhope.mimasj1.J1MimasV2DisplayVerilog mul"    # mnozenie na DSP48A1 (forth16Mul; mozna z 19200)
+sbt "demo-mimas-j1/runMain newhope.mimasj1.J1MimasV2DisplayVerilog mul"    # mnozenie + MAC na 2 x DSP48A1 (mozna z 19200)
 sbt "demo-mimas-j1/test"                                                # symulacja (Verilator)
 ```
 ISE 14.7: XC6SLX9, CSG324, speed -3, top `J1MimasV2Display`, źródła
@@ -71,6 +71,14 @@ z `mimas>`, a Forth na **drugim** porcie płytki:
 ```
 python3 hw/cpu/j1/toolchain/forth/j1term.py -d COM14 hw/cpu/j1/toolchain/forth/swapforth.fs     # COM = port UART FPGA
 ```
+
+## Mnożenie i MAC (opcja `mul`)
+J1 z `J1MulUnit` na dwóch prymitywach DSP48A1 (rejestry w bloku DSP): szybsze `*`, `um*`, `m*`
+i akumulator MAC 48 b — `acc0 acc! mac macs acc@ acc@x`. Np. iloczyn skalarny do wyświetlacza:
+```
+decimal acc0  3 4 mac  5 6 mac  acc@ drop show      \ "042"
+```
+Kodowanie, potok i blokada: `cpu/j1/NEWHOPE.md`.
 
 ## Sprawdzone / do sprawdzenia
 - Symulacja: zgaszony po resecie, `291 96 io!` → „123” (zdekodowane z pinów `seg`/`en`),
