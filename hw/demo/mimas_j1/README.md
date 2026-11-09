@@ -57,9 +57,10 @@ Całe rozszerzenie to klasa `J1MimasV2DisplaySoc` w `hw/spinal/main/J1MimasV2Dis
 
 ## Budowanie i uruchomienie
 ```
-cd hw/cpu/j1/toolchain/forth && make && cd ../../..                     # obraz SwapForth (gforth)
+cd hw/cpu/j1/toolchain/forth && make && cd ../../..                     # obrazy SwapForth (gforth): nuc.binary i nuc-mul.binary
 sbt "demo-mimas-j1/runMain newhope.mimasj1.J1MimasV2DisplayVerilog"        # z hw/, UART 115200 -> demo/mimas_j1/hw/gen/J1MimasV2Display.v
 sbt "demo-mimas-j1/runMain newhope.mimasj1.J1MimasV2DisplayVerilog 19200"  # fabryczny firmware PIC-a
+sbt "demo-mimas-j1/runMain newhope.mimasj1.J1MimasV2DisplayVerilog mul"    # mnozenie na DSP48A1 (forth16Mul; mozna z 19200)
 sbt "demo-mimas-j1/test"                                                # symulacja (Verilator)
 ```
 ISE 14.7: XC6SLX9, CSG324, speed -3, top `J1MimasV2Display`, źródła
