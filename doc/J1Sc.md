@@ -8,7 +8,7 @@ Fork: https://github.com/TomekBarabasz/J1Sc, gałąź `newhope`, submodule `hw/c
 | | J1Sc | ten projekt (HwBuild) |
 | --- | --- | --- |
 | Scala | 2.11.8 | 2.13.14 |
-| SpinalHDL | 1.4.2 | 1.12.3 |
+| SpinalHDL | 1.4.2 | 1.15.0 |
 | sbt | 0.13.16 | 1.12.4 |
 | pakiet | brak (domyślny) | `newhope.*` |
 | układ katalogów | `src/main/scala` | `hw/spinal/{main,test}` |
@@ -29,7 +29,7 @@ gołe submodule do upstreamu.
 ## Stan (2026-11-03)
 Zrobione (szczegóły w `hw/cpu/j1/NEWHOPE.md`):
 1. Fork + gałąź `newhope`; źródła w `j1/hw/spinal` (rdzeń) i `boards/hw/spinal` (płytki upstreamu), przeniesione `git mv`.
-2. Port: Scala 2.13.14, SpinalHDL 1.12.3, sbt 1.12.4, pakiety `j1sc` / `j1sc.boards`; logika bez zmian.
+2. Port: Scala 2.13.14, SpinalHDL 1.15.0, sbt 1.12.4, pakiety `j1sc` / `j1sc.boards`; logika bez zmian.
 3. Poprawka upstreamu: `J1RStack` brał szerokość wskaźnika z `dataStackIdxWidth` — konfiguracje
    z różną głębokością stosów (`default16`, `debug16`, …) nie elaborowały się.
 4. `J1IsaTest` (Verilator): ALU, call/ret, jz, odczyt/zapis I/O.
