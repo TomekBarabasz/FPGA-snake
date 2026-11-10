@@ -24,13 +24,13 @@ lazy val vertebra = libRef("vertebra")
 lazy val mimas_v2 = libRef("mimas_v2")
 
 // ---- CPU: submodule cpu/j1 (github.com/TomekBarabasz/J1Sc, galaz newhope) ----
-// Fork J1Sc przeniesiony na Spinal 1.12 / Scala 2.13 (cpu/j1/NEWHOPE.md).
+// Fork J1Sc przeniesiony na Spinal 1.15 / Scala 2.13 (cpu/j1/NEWHOPE.md).
 // Testy CPU: sbt "{cpu/j1}j1/test".
 lazy val j1       = ProjectRef(file("cpu/j1"), "j1")
 lazy val j1boards = ProjectRef(file("cpu/j1"), "boards")   // SoC-e plytek, m.in. J1MimasV2Soc
 
 // ---- CPU: submodule cpu/microrv32 (fork microrv32, galaz newhope) ----
-// RV32IMC w SpinalHDL (agra-uni-bremen), port na Spinal 1.12 / Scala 2.13.
+// RV32IMC w SpinalHDL (agra-uni-bremen), port na Spinal 1.15 / Scala 2.13.
 // Regresja riscv-tests: sbt "{cpu/microrv32/microrv32}microrv32/test".
 lazy val microrv32 = ProjectRef(file("cpu/microrv32/microrv32"), "microrv32")
 
